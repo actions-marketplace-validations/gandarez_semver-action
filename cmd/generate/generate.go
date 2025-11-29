@@ -2,34 +2,15 @@ package generate
 
 import (
 	"fmt"
-	"regexp"
-	"strconv"
 
+	"github.com/gandarez/semver-action/internal/strategy"
 	"github.com/gandarez/semver-action/pkg/git"
 
 	"github.com/apex/log"
 	"github.com/blang/semver/v4"
 )
 
-// nolint: gochecknoglobals
-var (
-	branchBugfixPrefixRegex  = regexp.MustCompile(`(?i)^bugfix/.+`)
-	branchDocPrefixRegex     = regexp.MustCompile(`(?i)^doc/.+`)
-	branchFeaturePrefixRegex = regexp.MustCompile(`(?i)^feature/.+`)
-	branchHotfixPrefixRegex  = regexp.MustCompile(`(?i)^hotfix/.+`)
-	branchMajorPrefixRegex   = regexp.MustCompile(`(?i)^major/.+`)
-	branchMiscPrefixRegex    = regexp.MustCompile(`(?i)^misc/.+`)
-)
-
-const tagDefault = "0.0.0"
-
-type gitClient interface {
-	CurrentBranch() (string, error)
-	IsRepo() bool
-	LatestTag() string
-	AncestorTag(include, exclude string) string
-	SourceBranch(commitHash string) (string, error)
-}
+const initialTag = "0.0.0"
 
 // Result contains the result of Run().
 type Result struct {
@@ -53,26 +34,25 @@ func Run() (Result, error) {
 
 	log.Debug(params.String())
 
-	gc := git.NewGit(params.RepoDir)
+	gc := git.New(params.RepoDir)
 
 	return Tag(params, gc)
 }
 
-// Tag returns the calculated semantica version.
-func Tag(params Params, gc gitClient) (Result, error) {
+// Tag returns the calculated semantic version.
+func Tag(params Params, gc git.Git) (Result, error) {
+	err := gc.MakeSafe()
+	if err != nil {
+		return Result{}, fmt.Errorf("failed to make safe: %s", err)
+	}
+
 	if !gc.IsRepo() {
 		return Result{}, fmt.Errorf("current folder is not a git repository")
 	}
 
-	tagSource := "git"
-
-	if params.BaseVersion != nil {
-		tagSource = "parameter"
-	}
-
 	dest, err := gc.CurrentBranch()
 	if err != nil {
-		return Result{}, fmt.Errorf("failed to extract dest branche from commit: %s", err)
+		return Result{}, fmt.Errorf("failed to extract dest branch from commit: %s", err)
 	}
 
 	log.Debugf("dest branch: %q\n", dest)
@@ -84,22 +64,42 @@ func Tag(params Params, gc gitClient) (Result, error) {
 
 	log.Debugf("source branch: %q\n", source)
 
-	method, version := determineBumpStrategy(params.Bump, source, dest, params.MainBranchName, params.DevelopBranchName)
+	branchingStrategy, err := strategy.New(strategy.Configuration{
+		Bump:              params.Bump,
+		BranchingModel:    params.BranchingModel,
+		MainBranchName:    params.MainBranchName,
+		DevelopBranchName: params.DevelopBranchName,
+		PatchPattern:      params.PatchPattern,
+		MinorPattern:      params.MinorPattern,
+		MajorPattern:      params.MajorPattern,
+		BuildPattern:      params.BuildPattern,
+		HotfixPattern:     params.HotfixPattern,
+		ExcludePattern:    params.ExcludePattern,
+	})
+	if err != nil {
+		return Result{}, fmt.Errorf("failed to decide branching strategy: %s", err)
+	}
+
+	log.Debugf("using branching strategy: %q\n", branchingStrategy.Name())
+
+	method, version := branchingStrategy.DetermineBumpStrategy(source, dest)
 
 	log.Debugf("method: %q, version: %q", method, version)
 
+	if method == "" && version == "" {
+		log.Info("no version bump required")
+
+		return Result{}, nil
+	}
+
 	latestTag := gc.LatestTag()
 
-	var (
-		tag      *semver.Version
-		prefixRe = regexp.MustCompile(fmt.Sprintf("^%s", params.Prefix))
-	)
+	var tag *semver.Version
 
 	if latestTag == "" {
-		tag, _ = semver.New(tagDefault)
+		tag, _ = semver.New(initialTag)
 	} else {
-		latestTag = prefixRe.ReplaceAllLiteralString(latestTag, "")
-		parsed, err := semver.Parse(latestTag)
+		parsed, err := semver.ParseTolerant(latestTag)
 		if err != nil {
 			return Result{}, fmt.Errorf("failed to parse tag %q or not valid semantic version: %s", latestTag, err)
 		}
@@ -108,135 +108,28 @@ func Tag(params Params, gc gitClient) (Result, error) {
 
 	previousTag := params.Prefix + tag.String()
 
-	if tagSource != "git" {
+	if params.BaseVersion != nil {
 		tag = params.BaseVersion
 	}
 
-	if (version == "major" && method == "build") || method == "major" {
-		log.Debug("incrementing major")
-		if err := tag.IncrementMajor(); err != nil {
-			return Result{}, fmt.Errorf("failed to increment major version: %s", err)
-		}
+	result, err := branchingStrategy.Tag(strategy.TagParams{
+		DestBranch:   dest,
+		Method:       method,
+		Prefix:       params.Prefix,
+		PrereleaseID: params.PrereleaseID,
+		Tag:          tag,
+		Version:      version,
+	}, gc)
+	if err != nil {
+		return Result{}, fmt.Errorf("failed to tag: %s", err)
 	}
 
-	if (version == "minor" && method == "build") || method == "minor" {
-		log.Debug("incrementing minor")
-		if err := tag.IncrementMinor(); err != nil {
-			return Result{}, fmt.Errorf("failed to increment minor version: %s", err)
-		}
-	}
-
-	if (version == "patch" && method == "build") || method == "patch" || method == "hotfix" {
-		log.Debug("incrementing patch")
-		if err := tag.IncrementPatch(); err != nil {
-			return Result{}, fmt.Errorf("failed to increment patch version: %s", err)
-		}
-	}
-
-	var (
-		finalTag       string
-		ancestorTag    string
-		includePattern string
-		excludePattern string
-		isPrerelease   bool
-	)
-
-	switch method {
-	case "build":
-		{
-			isPrerelease = true
-			includePattern = fmt.Sprintf("%s[0-9]*-%s*", params.Prefix, params.PrereleaseID)
-
-			buildNumber, _ := semver.NewPRVersion("0")
-
-			if len(tag.Pre) > 1 && version == "" {
-				buildNumber = tag.Pre[1]
-			}
-
-			tag.Pre = nil
-
-			preVersion, err := semver.NewPRVersion(params.PrereleaseID)
-			if err != nil {
-				return Result{}, fmt.Errorf("failed to create new pre-release version: %s", err)
-			}
-
-			tag.Pre = append(tag.Pre, preVersion)
-
-			buildVersion, err := semver.NewPRVersion(strconv.Itoa(int(buildNumber.VersionNum + 1)))
-			if err != nil {
-				return Result{}, fmt.Errorf("failed to create new build version: %s", err)
-			}
-
-			tag.Pre = append(tag.Pre, buildVersion)
-
-			finalTag = params.Prefix + tag.String()
-		}
-	case "major", "minor", "patch":
-		if len(tag.Pre) > 0 {
-			isPrerelease = true
-			includePattern = fmt.Sprintf("%s[0-9]*-%s*", params.Prefix, params.PrereleaseID)
-		} else {
-			includePattern = fmt.Sprintf("%s[0-9]*", params.Prefix)
-			excludePattern = fmt.Sprintf("%s[0-9]*-%s*", params.Prefix, params.PrereleaseID)
-		}
-
-		finalTag = params.Prefix + tag.String()
-	default:
-		includePattern = fmt.Sprintf("%s[0-9]*", params.Prefix)
-		excludePattern = fmt.Sprintf("%s[0-9]*-%s*", params.Prefix, params.PrereleaseID)
-		finalTag = params.Prefix + tag.FinalizeVersion()
-	}
-
-	ancestorTag = gc.AncestorTag(includePattern, excludePattern)
+	log.Debugf("result: %+v\n", result)
 
 	return Result{
 		PreviousTag:  previousTag,
-		AncestorTag:  ancestorTag,
-		SemverTag:    finalTag,
-		IsPrerelease: isPrerelease,
+		AncestorTag:  result.AncestorTag,
+		SemverTag:    result.SemverTag,
+		IsPrerelease: result.IsPrerelease,
 	}, nil
-}
-
-// determineBumpStrategy determines the strategy for semver to bump product version.
-func determineBumpStrategy(bump, sourceBranch, destBranch, mainBranchName, developBranchName string) (string, string) {
-	if bump != "auto" {
-		return bump, ""
-	}
-
-	// bugfix into develop branch
-	if branchBugfixPrefixRegex.MatchString(sourceBranch) && destBranch == developBranchName {
-		return "build", "patch"
-	}
-
-	// doc into develop branch
-	if branchDocPrefixRegex.MatchString(sourceBranch) && destBranch == developBranchName {
-		return "build", ""
-	}
-
-	// feature into develop
-	if branchFeaturePrefixRegex.MatchString(sourceBranch) && destBranch == developBranchName {
-		return "build", "minor"
-	}
-
-	// major into develop
-	if branchMajorPrefixRegex.MatchString(sourceBranch) && destBranch == developBranchName {
-		return "build", "major"
-	}
-
-	// misc into develop branch
-	if branchMiscPrefixRegex.MatchString(sourceBranch) && destBranch == developBranchName {
-		return "build", ""
-	}
-
-	// hotfix into main branch
-	if branchHotfixPrefixRegex.MatchString(sourceBranch) && destBranch == mainBranchName {
-		return "hotfix", ""
-	}
-
-	// develop branch into main branch
-	if sourceBranch == developBranchName && destBranch == mainBranchName {
-		return "final", ""
-	}
-
-	return "build", ""
 }
