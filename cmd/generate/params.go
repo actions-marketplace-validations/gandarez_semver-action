@@ -41,7 +41,6 @@ type Params struct {
 	BuildPattern      regex.Regex
 	HotfixPattern     regex.Regex
 	ExcludePattern    regex.Regex
-	Ex                bool
 	Debug             bool
 }
 
@@ -85,7 +84,7 @@ func LoadParams() (Params, error) {
 
 	var patchPattern = branchBugfixPrefixRegex
 
-	if patchPatternStr := actions.GetInput("patch_pattern"); patchPatternStr != "" {
+	if patchPatternStr := actions.GetInput("patch_regex"); patchPatternStr != "" {
 		compiled, err := regex.Compile(patchPatternStr)
 		if err != nil {
 			return Params{}, fmt.Errorf("invalid patch pattern value: %s", patchPatternStr)
@@ -96,7 +95,7 @@ func LoadParams() (Params, error) {
 
 	var minorPattern = branchFeaturePrefixRegex
 
-	if minorPatternStr := actions.GetInput("minor_pattern"); minorPatternStr != "" {
+	if minorPatternStr := actions.GetInput("minor_regex"); minorPatternStr != "" {
 		compiled, err := regex.Compile(minorPatternStr)
 		if err != nil {
 			return Params{}, fmt.Errorf("invalid minor pattern value: %s", minorPatternStr)
@@ -107,7 +106,7 @@ func LoadParams() (Params, error) {
 
 	var majorPattern = branchMajorPrefixRegex
 
-	if majorPatternStr := actions.GetInput("major_pattern"); majorPatternStr != "" {
+	if majorPatternStr := actions.GetInput("major_regex"); majorPatternStr != "" {
 		compiled, err := regex.Compile(majorPatternStr)
 		if err != nil {
 			return Params{}, fmt.Errorf("invalid major pattern value: %s", majorPatternStr)
@@ -118,7 +117,7 @@ func LoadParams() (Params, error) {
 
 	var buildPattern = branchBuildPatternRegex
 
-	if buildPatternStr := actions.GetInput("build_pattern"); buildPatternStr != "" {
+	if buildPatternStr := actions.GetInput("build_regex"); buildPatternStr != "" {
 		compiled, err := regex.Compile(buildPatternStr)
 		if err != nil {
 			return Params{}, fmt.Errorf("invalid build pattern value: %s", buildPatternStr)
@@ -130,7 +129,7 @@ func LoadParams() (Params, error) {
 
 	var hotfixPattern = branchHotfixPatternRegex
 
-	if hotfixPatternStr := actions.GetInput("hotfix_pattern"); hotfixPatternStr != "" {
+	if hotfixPatternStr := actions.GetInput("hotfix_regex"); hotfixPatternStr != "" {
 		compiled, err := regex.Compile(hotfixPatternStr)
 		if err != nil {
 			return Params{}, fmt.Errorf("invalid hotfix pattern value: %s", hotfixPatternStr)
@@ -141,7 +140,7 @@ func LoadParams() (Params, error) {
 
 	var excludePattern regex.Regex
 
-	if excludePatternStr := actions.GetInput("exclude_pattern"); excludePatternStr != "" {
+	if excludePatternStr := actions.GetInput("exclude_regex"); excludePatternStr != "" {
 		compiled, err := regex.Compile(excludePatternStr)
 		if err != nil {
 			return Params{}, fmt.Errorf("invalid exclude pattern value: %s", excludePatternStr)
